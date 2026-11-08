@@ -14,13 +14,16 @@ The result looks like the same print, just with more pixels and no
 compression debris.
 
     python3 upscale.py extended.png extended_2x.png --scale 2 --screen-origin 120 236
+
+With --plain (for the enhanced edit, whose dots became a maze texture, so there
+is no screen to redraw) it is a Lanczos enlargement with a gentle unsharp mask.
 """
 
 import argparse
 import math
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 from scipy import ndimage
 
 from zoom_out import SCREEN, descreen
@@ -40,10 +43,18 @@ def main():
     ap.add_argument("output")
     ap.add_argument("--scale", type=int, default=2)
     ap.add_argument("--screen-origin", type=float, nargs=2, default=(0.0, 0.0), metavar=("X", "Y"))
+    ap.add_argument("--plain", action="store_true", help="no print screen: Lanczos + unsharp mask")
     args = ap.parse_args()
 
     source = Image.open(args.input)
     icc = source.info.get("icc_profile")
+    extra = {"icc_profile": icc} if icc else {}
+    if args.plain:
+        im = source.convert("RGB")
+        im = im.resize((im.width * args.scale, im.height * args.scale), Image.LANCZOS)
+        im = im.filter(ImageFilter.UnsharpMask(radius=1.8, percent=45, threshold=2))
+        im.save(args.output, **extra)
+        return
     img = np.asarray(source.convert("RGB")).astype(np.float64) / 255.0
     h, w, _ = img.shape
     S = args.scale
@@ -67,7 +78,6 @@ def main():
             big[..., c] += (amp * carrier).real
 
     out = Image.fromarray((np.clip(big, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8))
-    extra = {"icc_profile": icc} if icc else {}
     out.save(args.output, **extra)
 
 

@@ -5,9 +5,10 @@ cd "$(dirname "$0")"
 mkdir -p build
 save_jpg() { python3 -c "import sys; from PIL import Image; im = Image.open(sys.argv[1]); im.save(sys.argv[2], quality=95, subsampling=0, icc_profile=im.info.get('icc_profile'))" "$1" "$2"; }
 
-# final: the halo of the user's edit (edit.jpg) enlarged 1.3x, with a slight zoom out
-python3 enlarge_halo.py edit.jpg source.jpg halo_final.png                          # 1366x1366
-python3 upscale.py halo_final.png halo_final_2x.png --scale 2 --plain               # 2732x2732
+# final: the halo of the user's edit (edit.jpg) enlarged 1.27x and turned 5 degrees,
+# same frame (no zoom out)
+python3 enlarge_halo.py edit.jpg source.jpg halo_final.png                          # 1254x1254
+python3 upscale.py halo_final.png halo_final_2x.png --scale 2 --plain               # 2508x2508
 save_jpg halo_final_2x.png halo_final_2x.jpg
 
 # v2: zoom out of source.jpg with the thin clean ring

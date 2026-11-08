@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
-"""Enlarge the halo of the user's edit (edit.jpg) and zoom out very slightly.
+"""Enlarge the halo of the user's edit (edit.jpg), tilt it slightly, keep the frame.
 
 edit.jpg is the original picture (source.jpg) after an enhancer pass (which
 turned the print dots into a fine maze texture) with a glowing halo painted on
-top. The halo is made of three parts, and each is moved with the same
-enlargement, a homothety around ANCHOR, the middle of the ring's front arc,
-so the bigger ring still rests on the head where the old one did:
+top. The halo is enlarged SCALE times and turned ROTATE degrees (positive =
+flatter, the right end comes down) around a pivot on the ring's minor axis,
+PIVOT of the way from its centre to the middle of its front arc. That choice
+keeps the bigger ring inside the same 1254 px frame, keeps the old ring fully
+under the new one, and moves the front arc only a few px on the head. The halo
+is made of three parts, and each is moved with that same transform:
 
 1. The ring, its darkened inside and its glow out to D0 px past the ring are
    magnified straight from the edit's own pixels (cubic spline), so the halo
-   keeps exactly the look of the edit.
+   keeps exactly the look of the edit; a mild unsharp mask offsets the
+   softening that the enlargement brings.
 2. The lights outside that zone (sparkle stars, the vertical flare, glitter
    and the bloom) are lifted off the edit as a light layer, magnified and
    screened back on. The background they sat on is recovered by undoing the
    screen blend (bloom) and inpainting (stars, flare, glitter). The bloom is
    measured against source.jpg, aligned to the edit (scale, anisotropy,
    rotation and shift fitted to 0.986 correlation, under 1 px residual).
-3. The canvas grows by a few percent. The new border is quilted from the
-   edit's own background (real blocks, graph-cut seams and Poisson blending),
-   never from the face, the sword or the halo.
+3. The frame stays as it is. The edit's last 3 columns on the right carry a
+   green fringe; their colour is taken from the column next to them.
+   (--margins L T R B grows the canvas instead, quilting the new border from
+   the edit's own background, never from the face, the sword or the halo.)
 
 Everything outside the halo's reach keeps the edit's exact pixels.
 
-    python3 enlarge_halo.py edit.jpg source.jpg out.png [--scale 1.3]
+    python3 enlarge_halo.py edit.jpg source.jpg out.png [--scale 1.27] [--rotate 5]
 """
 
 import argparse
@@ -38,10 +43,15 @@ from add_halo import ellipse_distance
 
 # ring of the edit (ellipse fitted to its bright band): cx, cy, a, b, tilt deg
 RING = (389.9, 144.0, 287.5, 54.5, -18.1)
-SCALE = 1.30
+SCALE = 1.27
+ROTATE = 5.0       # degrees; positive = flatter (the right end comes down)
+PIVOT = 0.4        # 0 = ring centre, 1 = middle of the front arc
 D0 = 25.0          # px past the ring centre line that move as pixels (band + glow)
 FEATHER = 24.0     # px, soft hand-over from the magnified pixels to the background
-MARGINS = (64, 80, 48, 32)   # canvas growth: left, top, right, bottom
+MARGINS = (0, 0, 0, 0)       # canvas growth (left, top, right, bottom); the zoomed-out
+                             # variant used (64, 80, 48, 32)
+FRINGE_COLS = 3              # green fringe on the edit's right edge
+RESHARPEN = 0.35             # unsharp amount that offsets the softening of the enlargement
 
 # source.jpg -> edit.jpg geometry: scale, extra y scale, rotation (rad), shift x, y
 ALIGN = (1.02971815, 1.00459745, 0.00472007546, 15.8556122, -0.988414132)
@@ -131,12 +141,27 @@ def inpaint(img, mask, rng):
     return out
 
 
+def fix_right_fringe(img, n=FRINGE_COLS):
+    """Give the last n columns the colour of the column next to them, keeping their
+    brightness (the edit has a thin green line there)."""
+    lw = np.array([0.2126, 0.7152, 0.0722])
+    ref = img[:, -n - 2]
+    chroma = ndimage.gaussian_filter1d(ref - (ref @ lw)[:, None], 2.0, axis=0)
+    out = img.copy()
+    for j in range(1, n + 1):
+        out[:, -j] = np.clip((img[:, -j] @ lw)[:, None] + chroma, 0.0, 1.0)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("edit")
     ap.add_argument("source")
     ap.add_argument("output")
     ap.add_argument("--scale", type=float, default=SCALE)
+    ap.add_argument("--rotate", type=float, default=ROTATE)
+    ap.add_argument("--pivot", type=float, default=PIVOT)
+    ap.add_argument("--margins", type=int, nargs=4, default=MARGINS, metavar=("L", "T", "R", "B"))
     ap.add_argument("--debug", default=None, help="folder for intermediate images")
     args = ap.parse_args()
     k = args.scale
@@ -152,7 +177,8 @@ def main():
     tilt = math.radians(tilt_deg)
     anchor = (cx - b * math.sin(tilt), cy + b * math.cos(tilt))   # middle of the front arc
     d_old, t_old, _, _ = ellipse_distance(xx, yy, cx, cy, a, b, tilt)
-    log(f"anchor {anchor[0]:.1f},{anchor[1]:.1f}  scale {k}")
+    pvx, pvy = cx + args.pivot * (anchor[0] - cx), cy + args.pivot * (anchor[1] - cy)
+    log(f"pivot {pvx:.1f},{pvy:.1f}  scale {k}  rotate {args.rotate}")
 
     # ---- the original picture in the edit's geometry and tones ------------------
     free = np.ones((H, W), bool)
@@ -198,9 +224,11 @@ def main():
     lit_clean = screen(clean, e_bloom)
     e_det = np.where(det[..., None], np.clip(1.0 - (1.0 - R) / np.maximum(1.0 - lit_clean, 1e-3), 0, 1), 0.0)
     e_ext = screen(e_bloom, e_det)
-    # the flare and bloom were cut by the old frame: let them taper there
-    e_ext *= zo.smoothstep(0.0, 30.0, yy)[..., None]
-    e_ext *= zo.smoothstep(0.0, 8.0, xx)[..., None]
+    L, T, Rm, Bm = args.margins
+    if T > 0 or L > 0:
+        # the flare and bloom were cut by the old frame: let them taper there
+        e_ext *= zo.smoothstep(0.0, 30.0, yy)[..., None]
+        e_ext *= zo.smoothstep(0.0, 8.0, xx)[..., None]
 
     if args.debug:
         dbg = lambda name, im: Image.fromarray((np.clip(im, 0, 1) * 255 + 0.5).astype(np.uint8)).save(f"{args.debug}/{name}.png")
@@ -208,8 +236,20 @@ def main():
         dbg("e_ext", e_ext)
         dbg("det", det.astype(float))
 
-    # ---- zoom out: quilt the new border from the clean background ----------------
-    L, T, Rm, Bm = MARGINS
+    if (L, T, Rm, Bm) == (0, 0, 0, 0):
+        bg = fix_right_fringe(clean)
+        inner = np.ones((H, W), bool)
+        inner[:, W - FRINGE_COLS:] = False
+    else:
+        bg, inner = zoom_out_background(clean, d_old, det, xx, yy, lw, (L, T, Rm, Bm), rng)
+    place_halo(R, bg, inner, e_ext, clean, ext, d_old, (cx, cy, a, b, tilt), (pvx, pvy), k,
+               math.radians(args.rotate), (L, T, Rm, Bm), args.output)
+
+
+def zoom_out_background(clean, d_old, det, xx, yy, lw, margins, rng):
+    """Grow the canvas: quilt the new border from the clean background."""
+    H, W = clean.shape[:2]
+    L, T, Rm, Bm = margins
     CH, CW = H + T + Bm, W + L + Rm
     fl, ft, fr, fb = FADE_BANDS
     trusted = np.zeros((H, W), bool)
@@ -250,32 +290,48 @@ def main():
     edit_on_canvas = np.zeros((CH, CW, 3))
     edit_on_canvas[T:T + H, L:L + W] = clean
     bg[inner] = edit_on_canvas[inner]
+    return bg, inner[T:T + H, L:L + W]
 
-    # ---- put the enlarged halo on the new canvas ---------------------------------
+
+def place_halo(R, bg, inner_edit, e_ext, clean, ext, d_old, ring, pivot, k, rot, margins, output):
+    """Paint the transformed halo on the background and save."""
+    H, W = R.shape[:2]
+    L, T, Rm, Bm = margins
+    CH, CW = H + T + Bm, W + L + Rm
+    cx, cy, a, b, tilt = ring
+    px, py = pivot
+    cr, sr = math.cos(rot), math.sin(rot)
     CY_, CX_ = np.mgrid[0:CH, 0:CW].astype(np.float64)
-    ex, ey = CX_ - L, CY_ - T                      # edit coordinates of each canvas pixel
-    ax, ay = anchor
-    sx, sy = ax + (ex - ax) / k, ay + (ey - ay) / k  # where it comes from before enlarging
-    ncx, ncy = ax + k * (cx - ax) + L, ay + k * (cy - ay) + T
-    d_new, _, _, _ = ellipse_distance(CX_, CY_, ncx, ncy, k * a, k * b, tilt)
+    ex, ey = CX_ - L - px, CY_ - T - py            # edit coordinates, relative to the pivot
+    sx = px + (cr * ex + sr * ey) / k              # where each pixel comes from before the
+    sy = py + (-sr * ex + cr * ey) / k             # enlargement and the turn
+    vx, vy = cx - px, cy - py
+    ncx, ncy = px + k * (cr * vx - sr * vy) + L, py + k * (sr * vx + cr * vy) + T
+    d_new, _, _, _ = ellipse_distance(CX_, CY_, ncx, ncy, k * a, k * b, tilt + rot)
     inside_edit = (sx >= 0) & (sx <= W - 1) & (sy >= 0) & (sy <= H - 1)
     w = (1.0 - zo.smoothstep(k * D0, k * D0 + FEATHER, d_new)) * inside_edit
     patch = np.stack([ndimage.map_coordinates(R[..., c], [sy, sx], order=3, mode="nearest")
                       for c in range(3)], -1)
-    light = np.stack([ndimage.map_coordinates(e_ext[..., c], [sy, sx], order=1, mode="constant", cval=0.0)
+    light = np.stack([ndimage.map_coordinates(e_ext[..., c], [sy, sx], order=3, mode="constant", cval=0.0)
                       for c in range(3)], -1)
+    # enlarging softens: give back the crispness of the rest of the picture
+    amt = RESHARPEN * min(max(k - 1.0, 0.0) / 0.3, 1.0)
+    if amt > 0:
+        patch = np.clip(patch + amt * (patch - gauss(patch, 1.0)), 0.0, 1.0)
+        light = light + amt * (light - gauss(light, 1.0))
+    light = np.clip(light, 0.0, 1.0)
     out = w[..., None] * patch + (1.0 - w[..., None]) * screen(bg, light)
     out = np.clip(out, 0.0, 1.0)
 
     # untouched pixels stay bit-exact
-    far = (np.abs(w) < 1e-6) & (light.max(-1) < 1e-4) & inner
+    unchanged = inner_edit & ~(ext & (np.abs(clean - R).max(-1) > 0))
+    keep = (np.abs(w) < 1e-6) & (light.max(-1) < 1e-4) & np.pad(unchanged, ((T, Bm), (L, Rm)))
     exact = np.zeros((CH, CW, 3))
     exact[T:T + H, L:L + W] = R
-    keep = far & np.pad(~(ext & (np.abs(clean - R).max(-1) > 0)), ((T, Bm), (L, Rm)), constant_values=False)
     out[keep] = exact[keep]
 
-    Image.fromarray((out * 255.0 + 0.5).astype(np.uint8)).save(args.output)
-    log(f"saved {args.output} ({CW}x{CH})")
+    Image.fromarray((out * 255.0 + 0.5).astype(np.uint8)).save(output)
+    log(f"saved {output} ({CW}x{CH})")
 
 
 if __name__ == "__main__":

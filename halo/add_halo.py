@@ -30,21 +30,24 @@ from PIL import Image
 # --------------------------------------------------------------------------
 # Halo geometry (pixels, for the 1200x1184 source)
 # --------------------------------------------------------------------------
-CENTER = (430.0, 140.0)  # ring centre (x, y)
-SEMI_MAJOR = 265.0       # half width of the ring
-SEMI_MINOR = 52.0        # half height (perspective flattening)
-TILT_DEG = -14.0         # negative = right end higher, follows the head tilt
+# Defaults are for the zoomed-out canvas made by zoom_out.py (1440x1456), where
+# the original picture sits at (120, 236). Geometry is in canvas pixels at 1x.
+CENTER = (575.0, 210.0)  # ring centre (x, y)
+SEMI_MAJOR = 285.0       # half width of the ring
+SEMI_MINOR = 56.0        # half height (perspective flattening)
+TILT_DEG = -12.0         # negative = right end higher, follows the head tilt
 CORE_WIDTH = 9.5         # line thickness at the sides of the ring
+SCREEN_ORIGIN = (120.0, 236.0)  # original picture's top-left on the canvas
 
 # --------------------------------------------------------------------------
 # Halftone screen measured from the source: two cosine gratings at +/-45 deg.
 # Frequencies and phases were fitted on the dotted hair areas; the phase is
 # consistent across the whole picture, so it is a single global screen.
 # --------------------------------------------------------------------------
-SCREEN_F1 = (0.1802, 0.1802)
+SCREEN_F1 = (0.1801, 0.1802)
 SCREEN_F2 = (0.1801, -0.1802)
-SCREEN_PH1 = math.radians(38.0)
-SCREEN_PH2 = math.radians(-5.0)
+SCREEN_PH1 = math.radians(50.8)
+SCREEN_PH2 = math.radians(-2.1)
 
 # --------------------------------------------------------------------------
 # Palette (sRGB 0..1), built from colours sampled in the picture
@@ -148,9 +151,24 @@ def ring_coverage(dist, width):
     return np.clip(width / 2.0 - np.abs(dist) + 0.5, 0.0, 1.0)
 
 
-def render(src, cx, cy, a, b, tilt_deg, core_w, seed=7):
+def render(src, cx, cy, a, b, tilt_deg, core_w, screen_origin=(0.0, 0.0), scale=1.0, seed=7):
+    """Paint the halo on `src`. Geometry is given in original-resolution pixels;
+    `scale` renders it natively on an upscaled canvas (crisper ring)."""
     H, W = src.shape[:2]
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    S = float(scale)
+    # geometry in output pixels (pixel centres map as (x + 0.5) * S - 0.5)
+    cx, cy = (cx + 0.5) * S - 0.5, (cy + 0.5) * S - 0.5
+    a, b, core_w = a * S, b * S, core_w * S
+
+    # work only on the region the halo can reach
+    reach = 3 * 42.0 * S
+    x0, x1 = int(max(cx - a - reach, 0)), int(min(cx + a + reach, W))
+    y0, y1 = int(max(cy - a - reach, 0)), int(min(cy + 9 * b + reach, H))
+    full = src
+    src = src[y0:y1, x0:x1]
+    h, w = src.shape[:2]
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float64)
+
     tilt = math.radians(tilt_deg)
     vx, vy = -math.sin(tilt), math.cos(tilt)  # unit vector towards the front arc
 
@@ -173,17 +191,19 @@ def render(src, cx, cy, a, b, tilt_deg, core_w, seed=7):
     fringe_c = ring_coverage(d_dn, width) * (1.0 - core)
 
     # glows from the lit core
-    g_tight = norm(gaussian_blur(core_lit, 2.2))
-    g_inner = norm(gaussian_blur(core_lit, 6.0))
-    g_mid = norm(gaussian_blur(core_lit, 16.0))
-    g_haze = norm(gaussian_blur(core_lit, 42.0))
+    g_tight = norm(gaussian_blur(core_lit, 2.2 * S))
+    g_inner = norm(gaussian_blur(core_lit, 6.0 * S))
+    g_mid = norm(gaussian_blur(core_lit, 16.0 * S))
+    g_haze = norm(gaussian_blur(core_lit, 42.0 * S))
 
-    pattern = screen_pattern(xx, yy)
+    # the dot screen is anchored to the original picture, wherever it sits on the canvas
+    pattern = screen_pattern((xx + 0.5) / S - 0.5 - screen_origin[0],
+                             (yy + 0.5) / S - 0.5 - screen_origin[1])
     ink_pattern = 1.0 - pattern
 
     # background brightness decides how much contrast edge the ring needs
     lum = src @ np.array([0.2126, 0.7152, 0.0722])
-    bg = gaussian_blur(lum, 10.0)
+    bg = gaussian_blur(lum, 10.0 * S)
     on_bright = smoothstep(0.55, 0.85, bg)
 
     # light spill on the crown just below the ring
@@ -220,13 +240,16 @@ def render(src, cx, cy, a, b, tilt_deg, core_w, seed=7):
     tube = tube * (0.93 + 0.07 * depth)[..., None]
     out = over(out, tube, core)
 
-    # 7) grain only where the halo touched the picture
-    touched = np.clip(g_mid * 1.4 + core, 0.0, 1.0)
+    # 7) grain only where the halo touched the picture, sized like the picture's own
+    touched = np.clip(g_mid * 1.4, 0.0, 1.0) * (1.0 - 0.6 * core)   # keep the ring itself clean
     rng = np.random.default_rng(seed)
-    grain = rng.normal(0.0, 0.022, (H, W))
+    grain = gaussian_blur(rng.normal(0.0, 1.0, (h, w)), 0.45 * S)
+    grain *= 0.022 / (grain.std() + 1e-9)
     out = out + (grain * touched)[..., None]
 
-    return np.clip(out, 0.0, 1.0)
+    result = full.copy()
+    result[y0:y1, x0:x1] = np.clip(out, 0.0, 1.0)
+    return result
 
 
 def main():
@@ -239,12 +262,17 @@ def main():
     ap.add_argument("--b", type=float, default=SEMI_MINOR)
     ap.add_argument("--tilt", type=float, default=TILT_DEG)
     ap.add_argument("--width", type=float, default=CORE_WIDTH)
+    ap.add_argument("--screen-origin", type=float, nargs=2, default=SCREEN_ORIGIN, metavar=("X", "Y"),
+                    help="where the original picture's top-left corner sits on this canvas")
+    ap.add_argument("--scale", type=float, default=1.0,
+                    help="canvas resolution relative to the geometry above (2 for the 2x render)")
     args = ap.parse_args()
 
     source = Image.open(args.input)
     icc = source.info.get("icc_profile")  # keep the colour profile so tones match exactly
     src = np.asarray(source.convert("RGB")).astype(np.float64) / 255.0
-    out = render(src, args.cx, args.cy, args.a, args.b, args.tilt, args.width)
+    out = render(src, args.cx, args.cy, args.a, args.b, args.tilt, args.width,
+                 screen_origin=tuple(args.screen_origin), scale=args.scale)
     img = Image.fromarray((out * 255.0 + 0.5).astype(np.uint8))
     extra = {"icc_profile": icc} if icc else {}
     if args.output.lower().endswith((".jpg", ".jpeg")):

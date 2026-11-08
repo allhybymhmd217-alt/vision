@@ -10,6 +10,7 @@ save_jpg() { python3 -c "import sys; from PIL import Image; im = Image.open(sys.
 python3 enlarge_halo.py edit.jpg source.jpg halo_final.png                          # 1254x1254
 python3 upscale.py halo_final.png halo_final_2x.png --scale 2 --plain               # 2508x2508
 save_jpg halo_final_2x.png halo_final_2x.jpg 100                              # 3.9 MB, under 4 MB
+python3 -c "from PIL import Image; Image.open('halo_final.png').convert('RGB').resize((512, 512), Image.LANCZOS, reducing_gap=3.0).save('halo_mlbb_512.png', optimize=True)"  # MLBB avatar
 
 # v2: zoom out of source.jpg with the thin clean ring
 python3 zoom_out.py source.jpg build/extended.png                                   # 1440x1456

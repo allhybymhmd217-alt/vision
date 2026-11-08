@@ -10,7 +10,8 @@ save_jpg() { python3 -c "import sys; from PIL import Image; im = Image.open(sys.
 python3 enlarge_halo.py edit.jpg source.jpg halo_final.png                          # 1254x1254
 python3 upscale.py halo_final.png halo_final_2x.png --scale 2 --plain               # 2508x2508
 save_jpg halo_final_2x.png halo_final_2x.jpg 100                              # 3.9 MB, under 4 MB
-python3 -c "from PIL import Image, ImageOps; ImageOps.expand(Image.open('halo_final.png').convert('RGB').resize((464, 464), Image.LANCZOS, reducing_gap=3.0), 24, 'white').save('halo_mlbb_512.png', optimize=True)"  # MLBB avatar in a white frame
+python3 -c "from PIL import Image, ImageOps; ImageOps.expand(Image.open('halo_final.png').convert('RGB'), 173, 'white').save('halo_mlbb_hq.png', optimize=True)"  # 1600x1600 white frame, picture untouched
+python3 -c "from PIL import Image, ImageOps; ImageOps.expand(Image.open('halo_final.png').convert('RGB').resize((400, 400), Image.LANCZOS, reducing_gap=3.0), 56, 'white').save('halo_mlbb_512.png', optimize=True)"  # same layout at 512 for MLBB
 
 # v2: zoom out of source.jpg with the thin clean ring
 python3 zoom_out.py source.jpg build/extended.png                                   # 1440x1456

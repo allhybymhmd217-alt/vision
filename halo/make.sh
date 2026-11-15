@@ -13,6 +13,9 @@ save_jpg halo_final_2x.png halo_final_2x.jpg 100                              # 
 python3 -c "from PIL import Image, ImageOps; ImageOps.expand(Image.open('halo_final.png').convert('RGB'), 173, 'white').save('halo_mlbb_hq.png', optimize=True)"  # 1600x1600 white frame, picture untouched
 python3 -c "from PIL import Image, ImageOps; ImageOps.expand(Image.open('halo_final.png').convert('RGB').resize((400, 400), Image.LANCZOS, reducing_gap=3.0), 56, 'white').save('halo_mlbb_512.png', optimize=True)"  # same layout at 512 for MLBB
 
+# wings: the black-and-white picture in the edit's colours, with the same halo
+python3 wings_halo.py wings.jpg edit.jpg source.jpg wings_final.png                  # 1200x1175
+
 # v2: zoom out of source.jpg with the thin clean ring
 python3 zoom_out.py source.jpg build/extended.png                                   # 1440x1456
 python3 upscale.py build/extended.png build/extended_2x.png --scale 2 --screen-origin 120 236

@@ -171,14 +171,44 @@ def main():
     H, W = R.shape[:2]
     S = np.asarray(Image.open(args.source).convert("RGB")).astype(np.float64) / 255.0
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
-
-    # ---- geometry of the old ring and the enlargement ---------------------------
     cx, cy, a, b, tilt_deg = RING
     tilt = math.radians(tilt_deg)
     anchor = (cx - b * math.sin(tilt), cy + b * math.cos(tilt))   # middle of the front arc
-    d_old, t_old, _, _ = ellipse_distance(xx, yy, cx, cy, a, b, tilt)
     pvx, pvy = cx + args.pivot * (anchor[0] - cx), cy + args.pivot * (anchor[1] - cy)
     log(f"pivot {pvx:.1f},{pvy:.1f}  scale {k}  rotate {args.rotate}")
+    hl = halo_layers(R, S, rng)
+    d_old, det, e_ext, clean, ext, lw = hl["d_old"], hl["det"], hl["e_ext"], hl["clean"], hl["ext"], hl["lw"]
+    L, T, Rm, Bm = args.margins
+    if T > 0 or L > 0:
+        # the flare and bloom were cut by the old frame: let them taper there
+        e_ext *= zo.smoothstep(0.0, 30.0, yy)[..., None]
+        e_ext *= zo.smoothstep(0.0, 8.0, xx)[..., None]
+
+    if args.debug:
+        dbg = lambda name, im: Image.fromarray((np.clip(im, 0, 1) * 255 + 0.5).astype(np.uint8)).save(f"{args.debug}/{name}.png")
+        dbg("clean", clean)
+        dbg("e_ext", e_ext)
+        dbg("det", det.astype(float))
+
+    if (L, T, Rm, Bm) == (0, 0, 0, 0):
+        bg = fix_right_fringe(clean)
+        inner = np.ones((H, W), bool)
+        inner[:, W - FRINGE_COLS:] = False
+    else:
+        bg, inner = zoom_out_background(clean, d_old, det, xx, yy, lw, (L, T, Rm, Bm), rng)
+    place_halo(R, bg, inner, e_ext, clean, ext, d_old, (cx, cy, a, b, tilt), (pvx, pvy), k,
+               math.radians(args.rotate), (L, T, Rm, Bm), args.output)
+
+
+def halo_layers(R, S, rng):
+    """Lift the edit's halo light off it. Returns a dict with, among others, the
+    ring's signed distance d_old and parameter t_old, the light outside the band
+    e_ext (bloom + stars, flare and glitter), the detail mask det, the aligned and
+    tone-matched original B_s, and `clean`: the edit without that outer light."""
+    H, W = R.shape[:2]
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    cx, cy, a, b, tilt_deg = RING
+    d_old, t_old, _, _ = ellipse_distance(xx, yy, cx, cy, a, b, math.radians(tilt_deg))
 
     # ---- the original picture in the edit's geometry and tones ------------------
     free = np.ones((H, W), bool)
@@ -224,26 +254,8 @@ def main():
     lit_clean = screen(clean, e_bloom)
     e_det = np.where(det[..., None], np.clip(1.0 - (1.0 - R) / np.maximum(1.0 - lit_clean, 1e-3), 0, 1), 0.0)
     e_ext = screen(e_bloom, e_det)
-    L, T, Rm, Bm = args.margins
-    if T > 0 or L > 0:
-        # the flare and bloom were cut by the old frame: let them taper there
-        e_ext *= zo.smoothstep(0.0, 30.0, yy)[..., None]
-        e_ext *= zo.smoothstep(0.0, 8.0, xx)[..., None]
-
-    if args.debug:
-        dbg = lambda name, im: Image.fromarray((np.clip(im, 0, 1) * 255 + 0.5).astype(np.uint8)).save(f"{args.debug}/{name}.png")
-        dbg("clean", clean)
-        dbg("e_ext", e_ext)
-        dbg("det", det.astype(float))
-
-    if (L, T, Rm, Bm) == (0, 0, 0, 0):
-        bg = fix_right_fringe(clean)
-        inner = np.ones((H, W), bool)
-        inner[:, W - FRINGE_COLS:] = False
-    else:
-        bg, inner = zoom_out_background(clean, d_old, det, xx, yy, lw, (L, T, Rm, Bm), rng)
-    place_halo(R, bg, inner, e_ext, clean, ext, d_old, (cx, cy, a, b, tilt), (pvx, pvy), k,
-               math.radians(args.rotate), (L, T, Rm, Bm), args.output)
+    return dict(d_old=d_old, t_old=t_old, det=det, e_bloom=e_bloom, e_det=e_det, e_ext=e_ext,
+                clean=clean, ext=ext, B_s=B_s, lw=lw)
 
 
 def zoom_out_background(clean, d_old, det, xx, yy, lw, margins, rng):

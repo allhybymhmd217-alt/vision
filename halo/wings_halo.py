@@ -47,8 +47,8 @@ LW = np.array([0.2126, 0.7152, 0.0722])
 # where the halo goes on the picture: ring centre, size relative to the edit's
 # ring, extra turn (degrees, applied after mirroring; the mirrored ring alone
 # tilts +18.1 degrees, right end down)
-CENTER = (865.0, 122.0)
-SCALE = 1.0
+CENTER = (915.0, 125.0)   # right above the crown (x about 916)
+SCALE = 0.84               # keeps the ring's end 17 px inside the right edge
 ROTATE = -8.0      # -> 10 degrees: parallel to the eye and brow line (measured 6-8
                    # degrees, right side lower), with a touch more for the hair's sweep
 MIRROR = True
@@ -343,6 +343,9 @@ def place(layer, fill, shape, src_pt, center, scale, rotate, mirror):
         u = -u
     sx, sy = cx + u, cy + v
     chans = layer if layer.ndim == 3 else layer[..., None]
+    if scale < 1.0:                                                  # shrinking: anti-alias first
+        sig = 0.5 * math.sqrt(1.0 / scale ** 2 - 1.0)
+        chans = ndimage.gaussian_filter(chans, (sig, sig, 0))
     out = np.stack([ndimage.map_coordinates(chans[..., k], [sy, sx], order=3, mode="constant", cval=fill)
                     for k in range(chans.shape[-1])], -1)
     return out if layer.ndim == 3 else out[..., 0]

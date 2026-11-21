@@ -4,10 +4,16 @@
 1. Resolution: the picture is enlarged 2x (Lanczos, mild unsharp mask) and
    everything below is drawn natively at that size; masks are found at 1x.
 2. Hair colour and highlights on the left: the long hair there was backlit to
-   white. Inside HAIR_POLY (sharp along the hand's drawn outline, soft elsewhere,
-   fading out towards the sky in the top-left corner) it takes the dark hair's
-   tones, HAIR_K * L^HAIR_G, weighted by how light the hair is locally, so it
-   blends into the dark hair. Elsewhere the highlights there were half pure white. Its
+   white, with no shading, only drawn lines. It becomes dark hair like the crown:
+   - where: wherever the picture has strand texture (gaps inside closed up, so
+     wide clumps count), inside HAIR_POLY, sharp along the hand's drawn outline;
+   - volume: each clump darkens towards its drawn lines and is lit through its
+     middle; a little lighter towards the light and the hair's outer edge;
+   - detail: the drawn lines redrawn crisp, fine hair fibres following the way
+     the strands run (line integral convolution over a smooth structure-tensor
+     flow), soft glossy streaks, and a rim light on the outer strands;
+   - weighted by how light the hair is locally, so it blends into the dark hair.
+   Elsewhere the highlights there were half pure white. Its
    strands are still in the original's top tones (and in its blue channel,
    which clips far less), so those tones are rolled off from LEFT_KNEE up to
    LEFT_TOP with a shoulder that spreads them out instead of flattening them,
@@ -67,10 +73,19 @@ HAIR_POLY = [(300, 0), (0, 0), (0, 1080), (130, 1075), (240, 975), (330, 990), (
              (360, 380), (310, 250), (282, 120)]
 # the drawn outline of the hand: the hair edge is sharp only along it
 HAND_LINE = [(560, 722), (500, 740), (470, 760), (445, 785), (420, 808), (402, 828), (398, 850), (398, 925)]
-# the top-left corner is sky with a few strands: the hair fades out towards it over
-# a wide soft gradient (ellipse radii in px), so no hard edge separates them
-CORNER = (260.0, 110.0, 0.5, 1.6)
-HAIR_K, HAIR_G = 0.40, 1.8
+# the hair itself is where the picture has strand texture (edge density), so it ends
+# where the strands end and the sky begins, with no drawn edge there
+HAIR_DENSITY = 0.012       # edge density that counts as strands
+HAIR_CLOSE = 40             # px: wide strands with no lines inside the hair are hair too
+SKY_MIN = 8000              # px: smaller gaps left between the strands are hair as well
+# backlit dark hair: tone deep inside the hair / at its lit outer edge and towards the
+# light (before the S-curve), rim light on the outer strands and its reach (px)
+HAIR_BASE = (0.21, 0.30)
+RIM, RIM_REACH = 0.55, 22.0
+CLUMP_PX = 10.0             # px over which a clump darkens towards its drawn lines
+CLUMP_DARK = 0.35           # line density that counts as fully in shadow
+LINE_INK = 0.55             # how dark the drawn strand lines read
+FIBRE, SHEEN = 0.06, 0.12   # fine hair texture, and its glossy streaks
 
 
 def masks(L):
@@ -128,6 +143,37 @@ def halo_strands(shape, rng):
     return full(np.clip(inner, 0, 1)), full(np.clip(stray, 0, 1))
 
 
+def hair_fibres(Ld, region, rng, steps=30, sigma=90.0):
+    """Fine hair texture: noise smeared along the direction the strands run (line
+    integral convolution over the structure-tensor flow), zero mean, unit spread."""
+    ys, xs = np.nonzero(region)
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    img = Ld[y0:y1, x0:x1]
+    g = ndimage.gaussian_filter(img, 1.5)
+    ix, iy = ndimage.sobel(g, 1), ndimage.sobel(g, 0)
+    jxx, jxy, jyy = (ndimage.gaussian_filter(a_, sigma) for a_ in (ix * ix, ix * iy, iy * iy))
+    theta = 0.5 * np.arctan2(2 * jxy, jxx - jyy) + 0.5 * np.pi   # along the strands
+    vx, vy = np.cos(theta), np.sin(theta)
+    noise = ndimage.gaussian_filter(rng.uniform(-1.0, 1.0, img.shape), 0.7)
+    hh, ww = img.shape
+    acc = noise.copy()
+    for sign in (1.0, -1.0):
+        py, px = np.mgrid[0:hh, 0:ww].astype(np.float64)
+        dx, dy = sign * vx, sign * vy
+        for _ in range(steps):
+            px, py = np.clip(px + dx, 0, ww - 1), np.clip(py + dy, 0, hh - 1)
+            nx = ndimage.map_coordinates(vx, [py, px], order=1)
+            ny = ndimage.map_coordinates(vy, [py, px], order=1)
+            flip = np.where(nx * dx + ny * dy < 0, -1.0, 1.0)           # keep heading the same way
+            dx, dy = nx * flip, ny * flip
+            acc += ndimage.map_coordinates(noise, [py, px], order=1)
+    acc -= ndimage.gaussian_filter(acc, 6.0)                         # keep the fine fibres only
+    acc /= acc.std() + 1e-9
+    out = np.zeros_like(Ld)
+    out[y0:y1, x0:x1] = acc
+    return out
+
+
 def main():
     picture, edit, source, output = sys.argv[1:5]
     P1 = load(picture)
@@ -140,6 +186,8 @@ def main():
     P = up(P1, (W, H))
     P = np.clip(P + 0.45 * (P - eh.gauss(P, 1.2)), 0.0, 1.0)
     L0 = P @ wh.LW
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    X, Y = xx / S, yy / S                                            # 1x coordinates
     hair_poly = Image.new("L", (W1, H1), 0)
     ImageDraw.Draw(hair_poly).polygon(HAIR_POLY, fill=255)
     hair_poly = up(np.asarray(hair_poly, np.float64) / 255.0, (W, H))
@@ -150,16 +198,23 @@ def main():
     ImageDraw.Draw(line).line([(x * S, y * S) for x, y in HAND_LINE], fill=255, width=2)
     near = ss(28.0 * S, 10.0 * S, ndimage.distance_transform_edt(np.asarray(line) == 0))
     hair_poly = (1.0 - near) * eh.gauss(hair_poly, 12.0 * S) + near * eh.gauss(hair_poly, 1.5 * S)
-    cr, cyr, c0, c1 = CORNER
-    hair_poly = hair_poly * ss(c0, c1, np.hypot(gx / cr, gy / cyr))
+    L1x = P1 @ wh.LW
+    grad = np.hypot(ndimage.sobel(ndimage.gaussian_filter(L1x, 0.8), 0), ndimage.sobel(ndimage.gaussian_filter(L1x, 0.8), 1))
+    present = ndimage.gaussian_filter(ndimage.gaussian_filter(grad, 14.0), 10.0) > HAIR_DENSITY
+    r_ = HAIR_CLOSE
+    disk = np.hypot(*np.mgrid[-r_:r_ + 1, -r_:r_ + 1]) <= r_
+    present = ndimage.binary_closing(np.pad(present, r_ + 5, mode="edge"), structure=disk)[r_ + 5:-r_ - 5, r_ + 5:-r_ - 5]
+    sky, n_sky = ndimage.label(~present)
+    sizes = ndimage.sum(np.ones_like(L1x), sky, range(1, n_sky + 1))
+    present = ~np.isin(sky, 1 + np.nonzero(sizes >= SKY_MIN)[0])
+    present = ndimage.gaussian_filter(present.astype(np.float64), 6.0)   # a soft edge to the sky
+    hair_poly = hair_poly * np.clip(up(present, (W, H)), 0.0, 1.0)
     bg_raw = up(bg1.astype(np.float64), (W, H)) > 0.5
     bg = bg_raw & (hair_poly < 0.5)                                  # blown-out hair is not sky
     # how much the sky treatment applies: soft, fading out wherever the hair fades in
     bgw = (eh.gauss(ndimage.binary_dilation(bg_raw, iterations=S).astype(np.float64), S)
            * ss(0.80, 0.97, L0) * (1.0 - hair_poly))
     band = up(band1.astype(np.float64), (W, H)) > 0.5
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
-    X, Y = xx / S, yy / S                                            # 1x coordinates
 
     # 2) highlights on the left: roll the top tones off with a spreading shoulder
     left = ss(0.62 * W1, 0.28 * W1, X)
@@ -170,11 +225,32 @@ def main():
     notbg = 1.0 - bgw
     Lr = L0 + left * notbg * (sh - L0)
 
-    # the light hair takes the dark hair's colour; how much depends on how light the
-    # hair is around each pixel (local mean), so it blends into the dark hair smoothly
-    hair_src = L0 + ss(0.5, 0.95, L0) * (Ld - L0)
+    # the light hair becomes backlit dark hair. Strand structure: the picture's own,
+    # normalised locally so every strand reads. Tone: like the crown, a little lighter
+    # towards the lit outer edge, with a rim light on the outer strands and gloss on
+    # the brightest ones. How much applies depends on how light the hair is around each
+    # pixel (local mean), so it blends into the dark hair smoothly
+    strand = ss(0.55, 1.0, Ld)                                       # fill 1, lines 0
+    # volume: each clump of hair between two drawn lines is rounded, dark by its lines
+    # and lit through its middle; wide clumps catch more light than narrow ones
+    # (a continuous field: the faint strokes are dashed, a distance to them is not)
+    near_lines = eh.gauss(ss(0.02, 0.15, 1.0 - Ld), CLUMP_PX * S / 2.0)
+    clump = 1.0 - ss(0.0, CLUMP_DARK, near_lines)
+    edge_in = ndimage.distance_transform_edt(hair_poly > 0.5) / S     # px from the hair's edge
+    lit = np.maximum(np.exp(-edge_in / 50.0), ss(0.42, 0.12, np.hypot(X - LIGHT[0], Y - LIGHT[1]) / W1))
+    base = HAIR_BASE[0] + (HAIR_BASE[1] - HAIR_BASE[0]) * lit
+    Lh = base * (0.45 + 0.80 * clump) * (0.55 + 0.45 * strand)
+    # the drawn strand lines, crisp, and fine hair fibres with glossy streaks where a
+    # clump catches the light
+    lines = ss(0.03, 0.18, 1.0 - Ld)
+    fib = hair_fibres(Ld, hair_poly > 0.3, rng)
+    Lh = Lh * (1.0 - LINE_INK * lines) * (1.0 + FIBRE * fib)
+    gloss = SHEEN * ss(0.55, 1.0, clump) * ss(0.6, 2.2, fib) * (1.0 - lines)
+    Lh = 1.0 - (1.0 - Lh) * (1.0 - gloss)
+    rim = RIM * strand ** 4 * np.exp(-edge_in / RIM_REACH)
+    Lh = 1.0 - (1.0 - Lh) * (1.0 - rim)
     hair_w = hair_poly * ss(0.45, 0.75, eh.gauss(L0, 12.0 * S))
-    Lr = Lr * (1.0 - hair_w) + hair_w * HAIR_K * hair_src ** HAIR_G
+    Lr = Lr * (1.0 - hair_w) + hair_w * Lh
 
     # 3) depth and local contrast
     L1 = np.interp(Lr, [0.0, 0.25, 0.5, 0.75, 1.0], [0.0, 0.2, 0.47, 0.76, 1.0])

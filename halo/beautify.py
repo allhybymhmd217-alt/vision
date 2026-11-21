@@ -3,7 +3,11 @@
 
 1. Resolution: the picture is enlarged 2x (Lanczos, mild unsharp mask) and
    everything below is drawn natively at that size; masks are found at 1x.
-2. Highlights on the left: the backlit hair there was half pure white. Its
+2. Hair colour and highlights on the left: the long hair there was backlit to
+   white. Inside HAIR_POLY (sharp along the hand's drawn outline, soft elsewhere,
+   fading out towards the sky in the top-left corner) it takes the dark hair's
+   tones, HAIR_K * L^HAIR_G, weighted by how light the hair is locally, so it
+   blends into the dark hair. Elsewhere the highlights there were half pure white. Its
    strands are still in the original's top tones (and in its blue channel,
    which clips far less), so those tones are rolled off from LEFT_KNEE up to
    LEFT_TOP with a shoulder that spreads them out instead of flattening them,
@@ -28,7 +32,7 @@ import math
 import sys
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from scipy import ndimage
 
 import enlarge_halo as eh
@@ -55,6 +59,18 @@ STARS = [  # x, y, vertical ray, horizontal ray, gain; on dark spots so they rea
     (884.0, 962.0, 22.0, 30.0, 0.8),     # glint on the cuff's top corner
 ]
 EYE = (547.0, 506.0)
+# the light, backlit hair on the left (1x outline; the face, hand and shirt collar
+# stay outside it). Inside, the hair takes the dark hair's tones: HAIR_K * L^HAIR_G
+HAIR_POLY = [(300, 0), (0, 0), (0, 1080), (130, 1075), (240, 975), (330, 990), (385, 975),
+             (398, 940), (398, 850), (402, 828), (420, 808), (445, 785), (455, 740),     # the hand's outline
+             (430, 690), (432, 620), (422, 540), (405, 470),                 # the face's left side
+             (360, 380), (310, 250), (282, 120)]
+# the drawn outline of the hand: the hair edge is sharp only along it
+HAND_LINE = [(560, 722), (500, 740), (470, 760), (445, 785), (420, 808), (402, 828), (398, 850), (398, 925)]
+# the top-left corner is sky with a few strands: the hair fades out towards it over
+# a wide soft gradient (ellipse radii in px), so no hard edge separates them
+CORNER = (260.0, 110.0, 0.5, 1.6)
+HAIR_K, HAIR_G = 0.40, 1.8
 
 
 def masks(L):
@@ -123,11 +139,27 @@ def main():
     # 1) resolution
     P = up(P1, (W, H))
     P = np.clip(P + 0.45 * (P - eh.gauss(P, 1.2)), 0.0, 1.0)
-    bg = up(bg1.astype(np.float64), (W, H)) > 0.5
+    L0 = P @ wh.LW
+    hair_poly = Image.new("L", (W1, H1), 0)
+    ImageDraw.Draw(hair_poly).polygon(HAIR_POLY, fill=255)
+    hair_poly = up(np.asarray(hair_poly, np.float64) / 255.0, (W, H))
+    gy, gx = np.mgrid[0:H, 0:W] / float(S)
+    # sharp along the hand's drawn outline, soft everywhere else (strands cross the cheek,
+    # and the hair thins out over the collar)
+    line = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(line).line([(x * S, y * S) for x, y in HAND_LINE], fill=255, width=2)
+    near = ss(28.0 * S, 10.0 * S, ndimage.distance_transform_edt(np.asarray(line) == 0))
+    hair_poly = (1.0 - near) * eh.gauss(hair_poly, 12.0 * S) + near * eh.gauss(hair_poly, 1.5 * S)
+    cr, cyr, c0, c1 = CORNER
+    hair_poly = hair_poly * ss(c0, c1, np.hypot(gx / cr, gy / cyr))
+    bg_raw = up(bg1.astype(np.float64), (W, H)) > 0.5
+    bg = bg_raw & (hair_poly < 0.5)                                  # blown-out hair is not sky
+    # how much the sky treatment applies: soft, fading out wherever the hair fades in
+    bgw = (eh.gauss(ndimage.binary_dilation(bg_raw, iterations=S).astype(np.float64), S)
+           * ss(0.80, 0.97, L0) * (1.0 - hair_poly))
     band = up(band1.astype(np.float64), (W, H)) > 0.5
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
     X, Y = xx / S, yy / S                                            # 1x coordinates
-    L0 = P @ wh.LW
 
     # 2) highlights on the left: roll the top tones off with a spreading shoulder
     left = ss(0.62 * W1, 0.28 * W1, X)
@@ -135,8 +167,14 @@ def main():
     src = L0 + ss(LEFT_KNEE, 0.95, L0) * (Ld - L0)
     span = LEFT_TOP - LEFT_KNEE
     sh = np.where(src > LEFT_KNEE, LEFT_KNEE + span * (np.clip(src - LEFT_KNEE, 0, None) / (1.0 - LEFT_KNEE)) ** 1.25, src)
-    notbg = 1.0 - eh.gauss(bg.astype(np.float64), 1.5 * S)
+    notbg = 1.0 - bgw
     Lr = L0 + left * notbg * (sh - L0)
+
+    # the light hair takes the dark hair's colour; how much depends on how light the
+    # hair is around each pixel (local mean), so it blends into the dark hair smoothly
+    hair_src = L0 + ss(0.5, 0.95, L0) * (Ld - L0)
+    hair_w = hair_poly * ss(0.45, 0.75, eh.gauss(L0, 12.0 * S))
+    Lr = Lr * (1.0 - hair_w) + hair_w * HAIR_K * hair_src ** HAIR_G
 
     # 3) depth and local contrast
     L1 = np.interp(Lr, [0.0, 0.25, 0.5, 0.75, 1.0], [0.0, 0.2, 0.47, 0.76, 1.0])
@@ -146,7 +184,6 @@ def main():
     # 4) twilight background
     r = np.hypot(X - LIGHT[0], Y - LIGHT[1]) / W1
     target = BG_NEAR - (BG_NEAR - BG_FAR) * ss(0.25, 1.1, r)
-    bgw = eh.gauss(ndimage.binary_dilation(bg, iterations=S).astype(np.float64), S) * ss(0.80, 0.97, L0)
     L2 = L1 * (1.0 - bgw) + bgw * np.minimum(L1, target)
 
     # 5) colours, then the print dots in the darkened background and the mid-tones

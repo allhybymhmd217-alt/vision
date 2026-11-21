@@ -71,6 +71,8 @@ HAND_LINE = [(560, 722), (500, 740), (470, 760), (445, 785), (420, 808), (402, 8
 # a wide soft gradient (ellipse radii in px), so no hard edge separates them
 CORNER = (260.0, 110.0, 0.5, 1.6)
 HAIR_K, HAIR_G = 0.27, 1.8
+HAIR_FLOOR = 0.145         # the crown's dark hair tone before the S-curve
+HAIR_EDGE = 0.27           # the light hair's tone once darkened, before the S-curve
 
 
 def masks(L):
@@ -170,11 +172,20 @@ def main():
     notbg = 1.0 - bgw
     Lr = L0 + left * notbg * (sh - L0)
 
-    # the light hair takes the dark hair's colour; how much depends on how light the
-    # hair is around each pixel (local mean), so it blends into the dark hair smoothly
+    # the light hair takes the dark hair's colour. The tone curve never goes down (lighter
+    # in, never darker out): the dark hair keeps its tone up to HAIR_FLOOR, the soft
+    # backlit edge of the dark hair stays at that tone, and only the light hair's strands
+    # spread above it, so no light band is left where the dark hair meets the light hair
     hair_src = L0 + ss(0.5, 0.95, L0) * (Ld - L0)
-    hair_w = hair_poly * ss(0.45, 0.75, eh.gauss(L0, 12.0 * S))
-    Lr = Lr * (1.0 - hair_w) + hair_w * HAIR_K * hair_src ** HAIR_G
+    # down to the face the whole hair takes it; over the shirt only the light hair does
+    low = ss(700.0, 850.0, Y)
+    mean = eh.gauss(L0, 12.0 * S)
+    t = np.clip((mean - (0.20 + 0.25 * low)) / (0.25 + 0.05 * low), 0.0, 1.0)
+    hair_w = hair_poly * t * t * (3.0 - 2.0 * t)
+    # the floor: the crown's tone inside the light hair (its strands go below it), the
+    # light hair's own tone on the dark hair's soft edge, so that edge matches both sides
+    floor = HAIR_FLOOR + (HAIR_EDGE - HAIR_FLOOR) * (1.0 - ss(0.72, 0.88, mean))
+    Lr = Lr * (1.0 - hair_w) + hair_w * np.maximum(HAIR_K * hair_src ** HAIR_G, np.minimum(Lr, floor))
 
     # 3) depth and local contrast
     L1 = np.interp(Lr, [0.0, 0.25, 0.5, 0.75, 1.0], [0.0, 0.2, 0.47, 0.76, 1.0])

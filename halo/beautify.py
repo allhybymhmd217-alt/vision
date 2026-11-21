@@ -4,10 +4,10 @@
 1. Resolution: the picture is enlarged 2x (Lanczos, mild unsharp mask) and
    everything below is drawn natively at that size; masks are found at 1x.
 2. Hair colour and highlights on the left: the long hair there was backlit to
-   white. Wherever the picture has strand texture (gaps closed up), inside
-   HAIR_POLY (sharp along the hand's drawn outline), it takes the crown's
-   colour as one flat tone, blended in by how light the hair is locally.
-   Elsewhere the highlights there were half pure white. Its
+   white. Inside HAIR_POLY (sharp along the hand's drawn outline, soft elsewhere,
+   fading out towards the sky in the top-left corner) it takes the dark hair's
+   tones, HAIR_K * L^HAIR_G, weighted by how light the hair is locally, so it
+   blends into the dark hair. Elsewhere the highlights there were half pure white. Its
    strands are still in the original's top tones (and in its blue channel,
    which clips far less), so those tones are rolled off from LEFT_KNEE up to
    LEFT_TOP with a shoulder that spreads them out instead of flattening them,
@@ -67,12 +67,10 @@ HAIR_POLY = [(300, 0), (0, 0), (0, 1080), (130, 1075), (240, 975), (330, 990), (
              (360, 380), (310, 250), (282, 120)]
 # the drawn outline of the hand: the hair edge is sharp only along it
 HAND_LINE = [(560, 722), (500, 740), (470, 760), (445, 785), (420, 808), (402, 828), (398, 850), (398, 925)]
-# the hair itself is where the picture has strand texture (edge density), so it ends
-# where the strands end and the sky begins, with no drawn edge there
-HAIR_DENSITY = 0.012       # edge density that counts as strands
-HAIR_CLOSE = 40             # px: wide strands with no lines inside the hair are hair too
-SKY_MIN = 8000              # px: smaller gaps left between the strands are hair as well
-HAIR_TONE = 0.26            # the crown hair's median tone in the original
+# the top-left corner is sky with a few strands: the hair fades out towards it over
+# a wide soft gradient (ellipse radii in px), so no hard edge separates them
+CORNER = (260.0, 110.0, 0.5, 1.6)
+HAIR_K, HAIR_G = 0.27, 1.8
 
 
 def masks(L):
@@ -142,8 +140,6 @@ def main():
     P = up(P1, (W, H))
     P = np.clip(P + 0.45 * (P - eh.gauss(P, 1.2)), 0.0, 1.0)
     L0 = P @ wh.LW
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
-    X, Y = xx / S, yy / S                                            # 1x coordinates
     hair_poly = Image.new("L", (W1, H1), 0)
     ImageDraw.Draw(hair_poly).polygon(HAIR_POLY, fill=255)
     hair_poly = up(np.asarray(hair_poly, np.float64) / 255.0, (W, H))
@@ -154,23 +150,16 @@ def main():
     ImageDraw.Draw(line).line([(x * S, y * S) for x, y in HAND_LINE], fill=255, width=2)
     near = ss(28.0 * S, 10.0 * S, ndimage.distance_transform_edt(np.asarray(line) == 0))
     hair_poly = (1.0 - near) * eh.gauss(hair_poly, 12.0 * S) + near * eh.gauss(hair_poly, 1.5 * S)
-    L1x = P1 @ wh.LW
-    grad = np.hypot(ndimage.sobel(ndimage.gaussian_filter(L1x, 0.8), 0), ndimage.sobel(ndimage.gaussian_filter(L1x, 0.8), 1))
-    present = ndimage.gaussian_filter(ndimage.gaussian_filter(grad, 14.0), 10.0) > HAIR_DENSITY
-    r_ = HAIR_CLOSE
-    disk = np.hypot(*np.mgrid[-r_:r_ + 1, -r_:r_ + 1]) <= r_
-    present = ndimage.binary_closing(np.pad(present, r_ + 5, mode="edge"), structure=disk)[r_ + 5:-r_ - 5, r_ + 5:-r_ - 5]
-    sky, n_sky = ndimage.label(~present)
-    sizes = ndimage.sum(np.ones_like(L1x), sky, range(1, n_sky + 1))
-    present = ~np.isin(sky, 1 + np.nonzero(sizes >= SKY_MIN)[0])
-    present = ndimage.gaussian_filter(present.astype(np.float64), 6.0)   # a soft edge to the sky
-    hair_poly = hair_poly * np.clip(up(present, (W, H)), 0.0, 1.0)
+    cr, cyr, c0, c1 = CORNER
+    hair_poly = hair_poly * ss(c0, c1, np.hypot(gx / cr, gy / cyr))
     bg_raw = up(bg1.astype(np.float64), (W, H)) > 0.5
     bg = bg_raw & (hair_poly < 0.5)                                  # blown-out hair is not sky
     # how much the sky treatment applies: soft, fading out wherever the hair fades in
     bgw = (eh.gauss(ndimage.binary_dilation(bg_raw, iterations=S).astype(np.float64), S)
            * ss(0.80, 0.97, L0) * (1.0 - hair_poly))
     band = up(band1.astype(np.float64), (W, H)) > 0.5
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    X, Y = xx / S, yy / S                                            # 1x coordinates
 
     # 2) highlights on the left: roll the top tones off with a spreading shoulder
     left = ss(0.62 * W1, 0.28 * W1, X)
@@ -181,11 +170,11 @@ def main():
     notbg = 1.0 - bgw
     Lr = L0 + left * notbg * (sh - L0)
 
-    # the light hair takes the crown's colour, flat: one tone (the crown's median before the
-    # S-curve), nothing added on it
-    Lh = HAIR_TONE
+    # the light hair takes the dark hair's colour; how much depends on how light the
+    # hair is around each pixel (local mean), so it blends into the dark hair smoothly
+    hair_src = L0 + ss(0.5, 0.95, L0) * (Ld - L0)
     hair_w = hair_poly * ss(0.45, 0.75, eh.gauss(L0, 12.0 * S))
-    Lr = Lr * (1.0 - hair_w) + hair_w * Lh
+    Lr = Lr * (1.0 - hair_w) + hair_w * HAIR_K * hair_src ** HAIR_G
 
     # 3) depth and local contrast
     L1 = np.interp(Lr, [0.0, 0.25, 0.5, 0.75, 1.0], [0.0, 0.2, 0.47, 0.76, 1.0])

@@ -21,6 +21,9 @@ python3 recolor.py anime.jpg edit.jpg source.jpg anime_final.png                
 python3 beautify.py anime.jpg edit.jpg source.jpg anime_art.png                     # the art pass, 2400x2400
 save_jpg anime_art.png anime_art.jpg
 
+# spear: the golden picture in the same colours, with the same halo (mirrored, over the crown)
+python3 wings_halo.py spear.jpg edit.jpg source.jpg spear_final.png --cx 468 --cy 138 --scale 0.78 --rotate -8  # 1099x1099
+
 # v2: zoom out of source.jpg with the thin clean ring
 python3 zoom_out.py source.jpg build/extended.png                                   # 1440x1456
 python3 upscale.py build/extended.png build/extended_2x.png --scale 2 --screen-origin 120 236

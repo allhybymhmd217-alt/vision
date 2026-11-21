@@ -19,16 +19,23 @@ import enlarge_halo as eh
 import wings_halo as wh
 
 
-def main():
-    picture, edit, source, output = sys.argv[1:5]
-    load = lambda f: np.asarray(Image.open(f).convert("RGB")).astype(np.float64) / 255.0
-    R, S, P = load(edit), load(source), load(picture)
+def load(f):
+    return np.asarray(Image.open(f).convert("RGB")).astype(np.float64) / 255.0
 
+
+def palette(edit, source):
+    """The edit's colour for every brightness level (256 x RGB)."""
+    R, S = load(edit), load(source)
     hl = eh.halo_layers(R, S, np.random.default_rng(5))
     away = (hl["d_old"] > 160) & ~ndimage.binary_dilation(hl["det"], np.ones((15, 15)))
     away[:, -eh.FRINGE_COLS:] = False                                # green fringe
-    lut = wh.gradient_map(R, away)
+    return wh.gradient_map(R, away)
 
+
+def main():
+    picture, edit, source, output = sys.argv[1:5]
+    P = load(picture)
+    lut = palette(edit, source)
     luma = P @ wh.LW
     out = wh.apply_map(lut, luma)
     keep = luma < 0.95                                               # near white clips

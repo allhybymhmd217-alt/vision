@@ -4,15 +4,9 @@
 1. Resolution: the picture is enlarged 2x (Lanczos, mild unsharp mask) and
    everything below is drawn natively at that size; masks are found at 1x.
 2. Hair colour and highlights on the left: the long hair there was backlit to
-   white, with no shading, only drawn lines. It becomes dark hair like the crown:
-   - where: wherever the picture has strand texture (gaps inside closed up, so
-     wide clumps count), inside HAIR_POLY, sharp along the hand's drawn outline;
-   - volume: each clump darkens towards its drawn lines and is lit through its
-     middle; a little lighter towards the light and the hair's outer edge;
-   - detail: the drawn lines redrawn crisp, fine hair fibres following the way
-     the strands run (line integral convolution over a smooth structure-tensor
-     flow), soft glossy streaks, and a rim light on the outer strands;
-   - weighted by how light the hair is locally, so it blends into the dark hair.
+   white. Wherever the picture has strand texture (gaps closed up), inside
+   HAIR_POLY (sharp along the hand's drawn outline), it takes the crown's
+   colour as one flat tone, blended in by how light the hair is locally.
    Elsewhere the highlights there were half pure white. Its
    strands are still in the original's top tones (and in its blue channel,
    which clips far less), so those tones are rolled off from LEFT_KNEE up to
@@ -78,14 +72,7 @@ HAND_LINE = [(560, 722), (500, 740), (470, 760), (445, 785), (420, 808), (402, 8
 HAIR_DENSITY = 0.012       # edge density that counts as strands
 HAIR_CLOSE = 40             # px: wide strands with no lines inside the hair are hair too
 SKY_MIN = 8000              # px: smaller gaps left between the strands are hair as well
-# backlit dark hair: tone deep inside the hair / at its lit outer edge and towards the
-# light (before the S-curve), rim light on the outer strands and its reach (px)
-HAIR_BASE = (0.21, 0.30)
-RIM, RIM_REACH = 0.55, 22.0
-CLUMP_PX = 10.0             # px over which a clump darkens towards its drawn lines
-CLUMP_DARK = 0.35           # line density that counts as fully in shadow
-LINE_INK = 0.55             # how dark the drawn strand lines read
-FIBRE, SHEEN = 0.06, 0.12   # fine hair texture, and its glossy streaks
+HAIR_TONE = 0.26            # the crown hair's median tone in the original
 
 
 def masks(L):
@@ -143,37 +130,6 @@ def halo_strands(shape, rng):
     return full(np.clip(inner, 0, 1)), full(np.clip(stray, 0, 1))
 
 
-def hair_fibres(Ld, region, rng, steps=30, sigma=90.0):
-    """Fine hair texture: noise smeared along the direction the strands run (line
-    integral convolution over the structure-tensor flow), zero mean, unit spread."""
-    ys, xs = np.nonzero(region)
-    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
-    img = Ld[y0:y1, x0:x1]
-    g = ndimage.gaussian_filter(img, 1.5)
-    ix, iy = ndimage.sobel(g, 1), ndimage.sobel(g, 0)
-    jxx, jxy, jyy = (ndimage.gaussian_filter(a_, sigma) for a_ in (ix * ix, ix * iy, iy * iy))
-    theta = 0.5 * np.arctan2(2 * jxy, jxx - jyy) + 0.5 * np.pi   # along the strands
-    vx, vy = np.cos(theta), np.sin(theta)
-    noise = ndimage.gaussian_filter(rng.uniform(-1.0, 1.0, img.shape), 0.7)
-    hh, ww = img.shape
-    acc = noise.copy()
-    for sign in (1.0, -1.0):
-        py, px = np.mgrid[0:hh, 0:ww].astype(np.float64)
-        dx, dy = sign * vx, sign * vy
-        for _ in range(steps):
-            px, py = np.clip(px + dx, 0, ww - 1), np.clip(py + dy, 0, hh - 1)
-            nx = ndimage.map_coordinates(vx, [py, px], order=1)
-            ny = ndimage.map_coordinates(vy, [py, px], order=1)
-            flip = np.where(nx * dx + ny * dy < 0, -1.0, 1.0)           # keep heading the same way
-            dx, dy = nx * flip, ny * flip
-            acc += ndimage.map_coordinates(noise, [py, px], order=1)
-    acc -= ndimage.gaussian_filter(acc, 6.0)                         # keep the fine fibres only
-    acc /= acc.std() + 1e-9
-    out = np.zeros_like(Ld)
-    out[y0:y1, x0:x1] = acc
-    return out
-
-
 def main():
     picture, edit, source, output = sys.argv[1:5]
     P1 = load(picture)
@@ -225,30 +181,9 @@ def main():
     notbg = 1.0 - bgw
     Lr = L0 + left * notbg * (sh - L0)
 
-    # the light hair becomes backlit dark hair. Strand structure: the picture's own,
-    # normalised locally so every strand reads. Tone: like the crown, a little lighter
-    # towards the lit outer edge, with a rim light on the outer strands and gloss on
-    # the brightest ones. How much applies depends on how light the hair is around each
-    # pixel (local mean), so it blends into the dark hair smoothly
-    strand = ss(0.55, 1.0, Ld)                                       # fill 1, lines 0
-    # volume: each clump of hair between two drawn lines is rounded, dark by its lines
-    # and lit through its middle; wide clumps catch more light than narrow ones
-    # (a continuous field: the faint strokes are dashed, a distance to them is not)
-    near_lines = eh.gauss(ss(0.02, 0.15, 1.0 - Ld), CLUMP_PX * S / 2.0)
-    clump = 1.0 - ss(0.0, CLUMP_DARK, near_lines)
-    edge_in = ndimage.distance_transform_edt(hair_poly > 0.5) / S     # px from the hair's edge
-    lit = np.maximum(np.exp(-edge_in / 50.0), ss(0.42, 0.12, np.hypot(X - LIGHT[0], Y - LIGHT[1]) / W1))
-    base = HAIR_BASE[0] + (HAIR_BASE[1] - HAIR_BASE[0]) * lit
-    Lh = base * (0.45 + 0.80 * clump) * (0.55 + 0.45 * strand)
-    # the drawn strand lines, crisp, and fine hair fibres with glossy streaks where a
-    # clump catches the light
-    lines = ss(0.03, 0.18, 1.0 - Ld)
-    fib = hair_fibres(Ld, hair_poly > 0.3, rng)
-    Lh = Lh * (1.0 - LINE_INK * lines) * (1.0 + FIBRE * fib)
-    gloss = SHEEN * ss(0.55, 1.0, clump) * ss(0.6, 2.2, fib) * (1.0 - lines)
-    Lh = 1.0 - (1.0 - Lh) * (1.0 - gloss)
-    rim = RIM * strand ** 4 * np.exp(-edge_in / RIM_REACH)
-    Lh = 1.0 - (1.0 - Lh) * (1.0 - rim)
+    # the light hair takes the crown's colour, flat: one tone (the crown's median before the
+    # S-curve), nothing added on it
+    Lh = HAIR_TONE
     hair_w = hair_poly * ss(0.45, 0.75, eh.gauss(L0, 12.0 * S))
     Lr = Lr * (1.0 - hair_w) + hair_w * Lh
 

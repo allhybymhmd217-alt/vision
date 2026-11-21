@@ -18,7 +18,8 @@ python3 wings_halo.py wings.jpg edit.jpg source.jpg wings_final.png             
 
 # anime: recoloured with the same palette, its own halo included
 python3 recolor.py anime.jpg edit.jpg source.jpg anime_final.png                    # 1200x1200
-python3 beautify.py anime.jpg edit.jpg source.jpg anime_art.png                     # the art pass
+python3 beautify.py anime.jpg edit.jpg source.jpg anime_art.png                     # the art pass, 2400x2400
+save_jpg anime_art.png anime_art.jpg
 
 # v2: zoom out of source.jpg with the thin clean ring
 python3 zoom_out.py source.jpg build/extended.png                                   # 1440x1456

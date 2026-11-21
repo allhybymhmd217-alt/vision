@@ -5,8 +5,9 @@
    everything below is drawn natively at that size; masks are found at 1x.
 2. Highlights on the left: the backlit hair there was half pure white. Its
    strands are still in the original's top tones (and in its blue channel,
-   which clips far less), so those tones are rolled off with a shoulder that
-   spreads them out instead of flattening them, fading in from the left.
+   which clips far less), so those tones are rolled off from LEFT_KNEE up to
+   LEFT_TOP with a shoulder that spreads them out instead of flattening them,
+   fading in from the left; bloom, bokeh and specks stay off that side.
 3. Depth: a gentle S-curve, and local contrast on the mid-tones.
 4. Background: the flat white turns into a twilight periwinkle, soft lavender
    near the light on the left and darker away from it, with the edit's print
@@ -39,7 +40,8 @@ ss = wh.ss
 S = 2                       # render scale
 # all coordinates below are in 1x pixels of anime.jpg
 LIGHT = (120.0, 480.0)      # the light on the left
-BG_NEAR, BG_FAR = 0.86, 0.46  # background brightness near the light and far from it
+BG_NEAR, BG_FAR = 0.72, 0.46  # background brightness near the light and far from it
+LEFT_KNEE, LEFT_TOP = 0.60, 0.80  # the left's highlights roll off from the knee up to this
 HOLE_AT = (1000, 60)        # a pixel of the sky inside the halo
 RING = (818.7, -168.1, 513.3, 124.2, 51.8)   # ellipse fitted to the halo band's centre line
 RING_HALF = 26.0            # half width of the band
@@ -130,8 +132,9 @@ def main():
     # 2) highlights on the left: roll the top tones off with a spreading shoulder
     left = ss(0.62 * W1, 0.28 * W1, X)
     Ld = 0.45 * L0 + 0.55 * P[..., 2]                                # blue keeps the strands
-    src = L0 + ss(0.72, 0.95, L0) * (Ld - L0)
-    sh = np.where(src > 0.72, 0.72 + 0.20 * (np.clip(src - 0.72, 0, None) / 0.28) ** 1.25, src)
+    src = L0 + ss(LEFT_KNEE, 0.95, L0) * (Ld - L0)
+    span = LEFT_TOP - LEFT_KNEE
+    sh = np.where(src > LEFT_KNEE, LEFT_KNEE + span * (np.clip(src - LEFT_KNEE, 0, None) / (1.0 - LEFT_KNEE)) ** 1.25, src)
     notbg = 1.0 - eh.gauss(bg.astype(np.float64), 1.5 * S)
     Lr = L0 + left * notbg * (sh - L0)
 
@@ -154,7 +157,7 @@ def main():
     rgb *= (1.0 + dots * (2.0 * screen_pattern(X, Y) - 1.0))[..., None]
 
     # 6) light
-    hi = ss(0.80, 0.97, L2) * (1.0 - bgw) * (1.0 - 0.7 * left)
+    hi = ss(0.80, 0.97, L2) * (1.0 - bgw) * (1.0 - 0.95 * left)
     bloom = 0.06 * eh.gauss(hi, 6.0 * S) + 0.06 * eh.gauss(hi, 24.0 * S)
 
     inner, stray = halo_strands((H, W), rng)
@@ -181,7 +184,7 @@ def main():
     pick = rng.choice(len(xs), n, replace=False)
     w_ = rng.uniform(0.3, 1.0, n) * np.exp(-ring_d[ys[pick], xs[pick]] / 25.0)
     dust = splat(np.zeros((H, W)), xs[pick] + rng.uniform(-1, 1, n), ys[pick] + rng.uniform(-1, 1, n), w_)
-    ys, xs = np.nonzero(bg & (ring_d > 60) & (target < 0.80))
+    ys, xs = np.nonzero(bg & (ring_d > 60) & (r > 0.42))           # away from the light only
     m = 110
     pick = rng.choice(len(xs), m, replace=False)
     specks = splat(np.zeros((H, W)), xs[pick].astype(float), ys[pick].astype(float), rng.uniform(0.2, 0.8, m))
@@ -190,7 +193,7 @@ def main():
     light = eh.screen(light, np.clip(sparkle, 0.0, 1.0)[..., None] * (0.55 + 0.45 * GLOW))
 
     # bokeh: soft orbs of light far behind the figure, in the darker background
-    ok = bg & (ring_d > 50) & (target < 0.72) & (X > 40) & (Y > 30)
+    ok = bg & (ring_d > 50) & (r > 0.55) & (X > 40) & (Y > 30)
     ys, xs = np.nonzero(ok[::8, ::8])
     bok = np.zeros((H, W))
     placed = []

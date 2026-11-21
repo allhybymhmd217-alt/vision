@@ -4,10 +4,10 @@
 1. Resolution: the picture is enlarged 2x (Lanczos, mild unsharp mask) and
    everything below is drawn natively at that size; masks are found at 1x.
 2. Hair colour and highlights on the left: the long hair there was backlit to
-   white. Inside HAIR_POLY (sharp along the hand's drawn outline, soft elsewhere,
-   fading out towards the sky in the top-left corner) it takes the dark hair's
-   tones, HAIR_K * L^HAIR_G, weighted by how light the hair is locally, so it
-   blends into the dark hair. Elsewhere the highlights there were half pure white. Its
+   white. Inside HAIR_POLY (sharp along the hand's drawn outline) it takes the
+   dark hair's tones, HAIR_K * L^HAIR_G. Its edges against the sky (top-left,
+   wisps included) and against the shirt showing between the locks come from the
+   original's warmth: its light hair is warm, its sky and shirt neutral. Elsewhere the highlights there were half pure white. Its
    strands are still in the original's top tones (and in its blue channel,
    which clips far less), so those tones are rolled off from LEFT_KNEE up to
    LEFT_TOP with a shoulder that spreads them out instead of flattening them,
@@ -61,15 +61,21 @@ STARS = [  # x, y, vertical ray, horizontal ray, gain; on dark spots so they rea
 EYE = (547.0, 506.0)
 # the light, backlit hair on the left (1x outline; the face, hand and shirt collar
 # stay outside it). Inside, the hair takes the dark hair's tones: HAIR_K * L^HAIR_G
-HAIR_POLY = [(300, 0), (0, 0), (0, 1080), (130, 1075), (240, 975), (330, 990), (385, 975),
+HAIR_POLY = [(300, 0), (0, 0), (0, 1200), (410, 1200), (408, 1100), (400, 1000),
              (398, 940), (398, 850), (402, 828), (420, 808), (445, 785), (455, 740),     # the hand's outline
              (430, 690), (432, 620), (422, 540), (405, 470),                 # the face's left side
              (360, 380), (310, 250), (282, 120)]
 # the drawn outline of the hand: the hair edge is sharp only along it
-HAND_LINE = [(560, 722), (500, 740), (470, 760), (445, 785), (420, 808), (402, 828), (398, 850), (398, 925)]
-# the top-left corner is sky with a few strands: the hair fades out towards it over
-# a wide soft gradient (ellipse radii in px), so no hard edge separates them
-CORNER = (260.0, 110.0, 0.5, 1.6)
+HAND_LINE = [(560, 722), (500, 740), (470, 760), (445, 785), (420, 808), (402, 828), (398, 850), (398, 940),
+             (400, 1000), (408, 1100), (410, 1200)]
+# the original's light hair is warm (red above blue) and its sky, collar and tie are
+# neutral: that draws the hair's own edge against the sky in the top-left corner (wisps
+# included) and over the shirt between the locks, instead of a drawn line
+SKY_WARMTH = 3.0           # (R - B) * 255 at or below this, on pure white: sky
+HAIR_WARMTH = (9.0, 15.0)  # over the shirt: shirt and tie below the first, hair above the second
+SHIRT_Y = (500.0, 540.0)    # the shirt shows between the locks below this
+SHIRT_MIN = 3000            # px: smaller neutral spots are hair
+SPECK_MAX = 400             # px: smaller warm specks on the shirt are not
 HAIR_K, HAIR_G = 0.27, 1.8
 HAIR_FLOOR = 0.145         # the crown's dark hair tone before the S-curve
 HAIR_EDGE = 0.27           # the light hair's tone once darkened, before the S-curve
@@ -89,6 +95,14 @@ def masks(L):
     lb, nb = ndimage.label(band)
     band = lb == np.argmax(ndimage.sum(band, lb, range(1, nb + 1))) + 1
     return bg, band
+
+
+def guided(I, p, r, eps):
+    """Guided filter (He et al.): p smoothed, with its edges following I's."""
+    m = lambda x: ndimage.uniform_filter(x, 2 * r + 1)
+    mI, mp = m(I), m(p)
+    a = (m(I * p) - mI * mp) / (m(I * I) - mI * mI + eps)
+    return np.clip(m(a) * I + m(mp - a * mI), 0.0, 1.0)
 
 
 def up(img, size):
@@ -145,15 +159,30 @@ def main():
     hair_poly = Image.new("L", (W1, H1), 0)
     ImageDraw.Draw(hair_poly).polygon(HAIR_POLY, fill=255)
     hair_poly = up(np.asarray(hair_poly, np.float64) / 255.0, (W, H))
-    gy, gx = np.mgrid[0:H, 0:W] / float(S)
+    gy = np.mgrid[0:H, 0:W][0] / float(S)
     # sharp along the hand's drawn outline, soft everywhere else (strands cross the cheek,
     # and the hair thins out over the collar)
     line = Image.new("L", (W, H), 0)
     ImageDraw.Draw(line).line([(x * S, y * S) for x, y in HAND_LINE], fill=255, width=2)
     near = ss(28.0 * S, 10.0 * S, ndimage.distance_transform_edt(np.asarray(line) == 0))
     hair_poly = (1.0 - near) * eh.gauss(hair_poly, 12.0 * S) + near * eh.gauss(hair_poly, 1.5 * S)
-    cr, cyr, c0, c1 = CORNER
-    hair_poly = hair_poly * ss(c0, c1, np.hypot(gx / cr, gy / cyr))
+    warm = ndimage.gaussian_filter((P1[..., 0] - P1[..., 2]) * 255.0, 2.0)
+    neutral = (warm <= SKY_WARMTH) & (P1 @ wh.LW > 0.97)
+    lab, _ = ndimage.label(neutral)
+    sky = np.isin(lab, np.setdiff1d(np.unique(lab[0, :W1 // 3]), [0]))          # touches the top
+    sky = up(ndimage.gaussian_filter(sky.astype(np.float64), 1.0), (W, H))
+    # the warmth is in 8 px JPEG blocks: smoothed, snapped to the drawing's edges, then a
+    # yes/no per pixel (less warm spots inside a lock are still hair, and so is the hair lit
+    # to white along the left edge: only big neutral areas are the shirt), with a soft edge
+    warm_hair = guided(P1 @ wh.LW, ss(*HAIR_WARMTH, ndimage.gaussian_filter(warm, 4.0)), 4, 0.002) > 0.5
+    gaps, n_gaps = ndimage.label(~warm_hair)
+    warm_hair |= np.isin(gaps, 1 + np.nonzero(ndimage.sum(np.ones_like(warm), gaps, range(1, n_gaps + 1)) < SHIRT_MIN)[0])
+    warm_hair |= np.isin(gaps, np.setdiff1d(gaps[:, 0], [0]))       # lit to white at the left edge
+    bits, n_bits = ndimage.label(warm_hair)                        # and specks on the shirt are not
+    warm_hair &= ~np.isin(bits, 1 + np.nonzero(ndimage.sum(np.ones_like(warm), bits, range(1, n_bits + 1)) < SPECK_MAX)[0])
+    warm_hair = ndimage.gaussian_filter(warm_hair.astype(np.float64), 1.0)
+    shirt = ss(SHIRT_Y[0], SHIRT_Y[1], gy)
+    hair_poly = hair_poly * (1.0 - sky) * (1.0 - shirt + shirt * up(warm_hair, (W, H)))
     bg_raw = up(bg1.astype(np.float64), (W, H)) > 0.5
     bg = bg_raw & (hair_poly < 0.5)                                  # blown-out hair is not sky
     # how much the sky treatment applies: soft, fading out wherever the hair fades in
@@ -177,11 +206,8 @@ def main():
     # backlit edge of the dark hair stays at that tone, and only the light hair's strands
     # spread above it, so no light band is left where the dark hair meets the light hair
     hair_src = L0 + ss(0.5, 0.95, L0) * (Ld - L0)
-    # down to the face the whole hair takes it; over the shirt only the light hair does
-    low = ss(700.0, 850.0, Y)
     mean = eh.gauss(L0, 12.0 * S)
-    t = np.clip((mean - (0.20 + 0.25 * low)) / (0.25 + 0.05 * low), 0.0, 1.0)
-    hair_w = hair_poly * t * t * (3.0 - 2.0 * t)
+    hair_w = hair_poly * ss(0.20, 0.45, mean)
     # the floor: the crown's tone inside the light hair (its strands go below it), the
     # light hair's own tone on the dark hair's soft edge, so that edge matches both sides
     floor = HAIR_FLOOR + (HAIR_EDGE - HAIR_FLOOR) * (1.0 - ss(0.72, 0.88, mean))

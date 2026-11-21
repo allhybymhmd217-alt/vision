@@ -16,6 +16,9 @@ python3 -c "from PIL import Image, ImageOps; ImageOps.expand(Image.open('halo_fi
 # wings: the black-and-white picture in the edit's colours, with the same halo
 python3 wings_halo.py wings.jpg edit.jpg source.jpg wings_final.png                  # 1200x1175
 
+# anime: recoloured with the same palette, its own halo included
+python3 recolor.py anime.jpg edit.jpg source.jpg anime_final.png                    # 1200x1200
+
 # v2: zoom out of source.jpg with the thin clean ring
 python3 zoom_out.py source.jpg build/extended.png                                   # 1440x1456
 python3 upscale.py build/extended.png build/extended_2x.png --scale 2 --screen-origin 120 236
